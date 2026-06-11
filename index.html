@@ -134,11 +134,11 @@
                     const vecJson = mockEmbedding(q);
                     rows = db.exec({
                         sql: `
-                            SELECT c.topic, c.start_time, c.summary, v.url, c.start_seconds, v.title, v.distance
+                            SELECT c.topic, c.start_time, c.summary, vid.url, c.start_seconds, vid.title, vec.distance
                             FROM chapters c
-                            JOIN videos v ON v.id = c.video_id
-                            JOIN vector_full_scan('chapters', 'embedding', vector_as_f32(?)) v ON c.id = v.rowid
-                            ORDER BY v.distance ASC
+                            JOIN videos vid ON vid.id = c.video_id
+                            JOIN vector_full_scan('chapters', 'embedding', vector_as_f32(?)) vec ON c.id = vec.rowid
+                            ORDER BY vec.distance ASC
                             LIMIT 10
                         `,
                         bind: [vecJson],
