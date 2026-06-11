@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sqlite-vector Explorer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #f9fafb; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body class="p-8">
+    <div class="max-w-2xl mx-auto bg-white p-6 rounded-lg shadow-md">
+        <h1 class="text-2xl font-bold mb-4">sqlite-vector WASM Explorer</h1>
+        <p class="mb-4 text-gray-600">Running SQLite with Vector Search in your browser!</p>
+        
+        <div class="mb-4">
+            <button id="runBtn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded transition">
+                Run Example
+            </button>
+        </div>
+
+        <div id="status" class="mb-4 text-sm font-mono text-blue-600">Initializing...</div>
+
+        <div class="bg-gray-100 p-4 rounded border border-gray-200">
+            <h2 class="text-lg font-semibold mb-2">Output Log:</h2>
+            <pre id="output" class="text-sm font-mono bg-black text-green-400 p-4 rounded min-h-[200px]"></pre>
+        </div>
+    </div>
+
+    <script type="module">
+        import initSqlite from 'https://esm.sh/@sqliteai/sqlite-wasm';
+
+        const output = document.getElementById('output');
+        const status = document.getElementById('status');
+        const runBtn = document.getElementById('runBtn');
+
+        function log(msg) {
+            output.textContent += msg + '\n';
+            output.scrollTop = output.scrollHeight;
+        }
+
+        async function init() {
+            try {
+                status.textContent = 'Loading SQLite WASM...';
+                const sqlite3 = await initSqlite();
+                status.textContent = 'SQLite WASM Ready!';
+                log('SQLite WASM loaded successfully.');
+                
+                runBtn.addEventListener('click', () => runExample(sqlite3));
+            } catch (err) {
+                status.textContent = 'Initialization Error';
+                log('Error: ' + err.message);
+                console.error(err);
+            }
+        }
+
+        async function runExample(sqlite3) {
+            output.textContent = '';
+            log('Starting example...');
+            const db = new sqlite3.oo1.DB(':memory:', 'c');
+            
+            try {
+                const version = db.exec("SELECT vector_version()", { returnValue: "resultRows" });
+                log(`sqlite-vector version: ${version[0][0]}`);
+                
+                log('Creating table items...');
+                db.exec("CREATE TABLE items(id INTEGER PRIMARY KEY, content TEXT, embedding BLOB)");
+                
+                log('Initializing vector extension...');
+                db.exec("SELECT vector_init('items', 'embedding', 'dimension=3,distance=l2')");
+                
+                const items = [
+                    { content: "Apple", vector: "[1.0, 1.0, 0.0]" },
+                    { content: "Banana", vector: "[1.1, 0.9, 0.1]" },
+                    { content: "Space Rocket", vector: "[0.0, 0.0, 10.0]" }
+                ];
+                
+                log('Inserting data...');
+                for (const item of items) {
+                    db.exec({
+                        sql: "INSERT INTO items(content, embedding) VALUES(?, vector_as_f32(?))",
+                        bind: [item.content, item.vector]
+                    });
+                    log(`  Inserted: ${item.content}`);
+                }
+                
+                const queryVector = "[1.0, 0.9, 0.0]";
+                log(`\nSearching for neighbors of ${queryVector}...`);
+                
+                const results = db.exec({
+                    sql: `
+                        SELECT i.content, v.distance 
+                        FROM items i
+                        JOIN vector_full_scan('items', 'embedding', vector_as_f32(?)) v ON i.id = v.rowid
+                        ORDER BY v.distance ASC
+                        LIMIT 5
+                    `,
+                    bind: [queryVector],
+                    returnValue: "resultRows"
+                });
+                
+                log('Search Results:');
+                results.forEach(([content, distance]) => {
+                    log(`- ${content} (distance: ${distance.toFixed(4)})`);
+                });
+                
+            } catch (err) {
+                log('Error during execution: ' + err.message);
+                console.error(err);
+            } finally {
+                db.close();
+                log('\nDatabase closed.');
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

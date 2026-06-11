@@ -1,0 +1,16 @@
+{
+  "name": "sqlite-vector",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@sqliteai/sqlite-wasm": "^3.50.4-wasm.1.0.0-sync.1.0.20-vector.1.0.0-memory.1.3.5"
+  }
+}
