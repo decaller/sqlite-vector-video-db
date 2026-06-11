@@ -17,21 +17,21 @@
         <p class="text-gray-400">Ceramah Parenting Islam — Powered by <code>sqlite-vector</code> & <code>Transformers.js</code></p>
     </header>
 
-    <div id="status" class="mb-4 p-3 rounded text-sm bg-yellow-900/30 border border-yellow-700 text-yellow-500 flex justify-between items-center">
-        <span>Initializing...</span>
+    <div id="status" class="mb-4 p-3 rounded text-sm bg-blue-900/30 border border-blue-700 text-blue-400 flex justify-between items-center cursor-pointer" id="initBox">
+        <span id="statusText">Click here or start typing to enable AI Search</span>
         <span id="modelStatus" class="opacity-70 text-xs"></span>
     </div>
 
     <div class="flex flex-col md:flex-row gap-4 mb-6">
         <input type="text" id="query" placeholder="Tanya apa saja... (misal: cara mendisiplinkan anak tanpa marah)" 
-               class="flex-1 bg-[#161b22] border border-[#30363d] rounded-md px-4 py-2 focus:outline-none focus:border-blue-500" disabled>
+               class="flex-1 bg-[#161b22] border border-[#30363d] rounded-md px-4 py-2 focus:outline-none focus:border-blue-500">
         
         <select id="searchMode" class="bg-[#161b22] border border-[#30363d] rounded-md px-4 py-2 focus:outline-none">
             <option value="vector">Semantic Search (AI)</option>
             <option value="fts">Keyword Search (FTS)</option>
         </select>
 
-        <button id="searchBtn" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-md transition disabled:opacity-50" disabled>
+        <button id="searchBtn" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-md transition disabled:opacity-50">
             Search
         </button>
     </div>
@@ -51,8 +51,10 @@
 
         let db = null;
         let extractor = null;
+        let isInitializing = false;
         
         const statusEl = document.getElementById('status');
+        const statusTextEl = document.getElementById('statusText');
         const modelStatusEl = document.getElementById('modelStatus');
         const queryEl = document.getElementById('query');
         const btnEl = document.getElementById('searchBtn');
@@ -60,98 +62,155 @@
         const statsEl = document.getElementById('stats');
         const modeEl = document.getElementById('searchMode');
 
-        async function init() {
+        async function ensureInitialized() {
+            if (db && (modeEl.value === 'fts' || extractor)) return true;
+            if (isInitializing) return false;
+            isInitializing = true;
+
             try {
-                // 1. Initialize SQLite
-                statusEl.querySelector('span').textContent = 'Loading Database...';
-                const sqlite3 = await initSqlite();
-                
-                const resp = await fetch('pkn.db');
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const buf = await resp.arrayBuffer();
-                
-                db = new sqlite3.oo1.DB('pkn.db', 'c');
-                const data = new Uint8Array(buf);
-                const p = sqlite3.wasm.alloc(data.length);
-                sqlite3.wasm.heap8u().set(data, p);
-                sqlite3.capi.sqlite3_deserialize(db.pointer, 'main', p, data.length, data.length, 0x01);
+                // 1. Initialize SQLite if not ready
+                if (!db) {
+                    statusTextEl.textContent = 'Loading Database...';
+                    const sqlite3 = await initSqlite();
+                    const resp = await fetch('pkn.db');
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const buf = await resp.arrayBuffer();
+                    
+                    db = new sqlite3.oo1.DB('pkn.db', 'c');
+                    const data = new Uint8Array(buf);
+                    const p = sqlite3.wasm.alloc(data.length);
+                    sqlite3.wasm.heap8u().set(data, p);
+                    sqlite3.capi.sqlite3_deserialize(db.pointer, 'main', p, data.length, data.length, 0x01);
+                    db.exec("SELECT vector_init('chapters', 'embedding', 'dimension=384,distance=l2')");
+                }
 
-                const chapterCount = db.exec("SELECT COUNT(*) FROM chapters", {returnValue: "resultRows"})[0][0];
-                db.exec("SELECT vector_init('chapters', 'embedding', 'dimension=384,distance=l2')");
-
-                // 2. Initialize Model
-                statusEl.querySelector('span').textContent = 'Loading AI Model (MiniLM)...';
-                extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-                    progress_callback: (p) => {
-                        if (p.status === 'progress') {
-                            modelStatusEl.textContent = `${p.file}: ${p.loaded.toFixed(1)}%`;
+                // 2. Initialize Model if Semantic mode selected
+                if (modeEl.value === 'vector' && !extractor) {
+                    statusTextEl.textContent = 'Loading AI Model (MiniLM)...';
+                    extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+                        progress_callback: (p) => {
+                            if (p.status === 'progress') {
+                                modelStatusEl.textContent = `${p.file}: ${p.loaded.toFixed(1)}%`;
+                            }
                         }
-                    }
-                });
+                    });
+                }
 
                 statusEl.className = 'mb-4 p-3 rounded text-sm bg-green-900/30 border border-green-700 text-green-500 flex justify-between items-center';
-                statusEl.querySelector('span').textContent = 'Ready!';
-                modelStatusEl.textContent = 'AI Model Loaded';
-                
-                statsEl.textContent = `${chapterCount} chapters indexed semantic search ready.`;
+                statusTextEl.textContent = 'Ready!';
+                if (extractor) modelStatusEl.textContent = 'AI Model Loaded';
                 
                 queryEl.disabled = false;
                 btnEl.disabled = false;
-                queryEl.focus();
-
+                isInitializing = false;
+                return true;
             } catch (err) {
                 statusEl.className = 'mb-4 p-3 rounded text-sm bg-red-900/30 border border-red-700 text-red-500';
-                statusEl.querySelector('span').textContent = 'Error: ' + err.message;
+                statusTextEl.textContent = 'Error: ' + err.message;
                 console.error(err);
+                isInitializing = false;
+                return false;
             }
         }
 
-        function highlight(text, terms) {
-            if (!text) return '';
-            let s = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-            for (const t of terms) {
-                if (!t || t.length < 2) continue;
-                const re = new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-                s = s.replace(re, '<mark>$1</mark>');
+        // Trick B: Semantic Highlighting using token-level similarity
+        async function highlightSemantically(queryVector, text) {
+            if (!extractor || !text) return text;
+            
+            // 1. Get token-level embeddings (pooling: 'none')
+            const output = await extractor(text, { pooling: 'none' });
+            const tokenVectors = output.data; 
+            const seqLen = output.dims[1];
+            const dim = output.dims[2];
+
+            // 2. Get tokens for reconstruction
+            // We need to use the tokenizer directly to get the mapping
+            const { input_ids } = await extractor.tokenizer(text);
+            const tokens = input_ids.data;
+
+            // 3. Compute scores for each token
+            const scores = new Float32Array(seqLen);
+            for (let i = 0; i < seqLen; i++) {
+                let dot = 0;
+                for (let d = 0; d < dim; d++) {
+                    dot += tokenVectors[i * dim + d] * queryVector[d];
+                }
+                scores[i] = dot;
             }
-            return s;
+
+            // 4. Reconstruct text with highlights
+            // Threshold 0.35 - 0.45 usually works for MiniLM semantic similarity
+            const threshold = 0.4;
+            let resultHtml = '';
+            
+            for (let i = 0; i < tokens.length; i++) {
+                const tokenId = tokens[i];
+                // Skip special tokens [CLS], [SEP]
+                if (tokenId === 101 || tokenId === 102) continue;
+
+                let word = extractor.tokenizer.decode([tokenId]);
+                
+                // Clean up WordPiece markers (##)
+                const isContinuation = word.startsWith('##');
+                if (isContinuation) word = word.substring(2);
+
+                if (scores[i] > threshold) {
+                    resultHtml += `<mark class="bg-blue-500/40 text-blue-100">${word}</mark>`;
+                } else {
+                    resultHtml += word;
+                }
+                
+                // Add space if next token isn't a continuation or punctuation
+                // This is a simple approximation
+                if (i < tokens.length - 1) {
+                    const nextWord = extractor.tokenizer.decode([tokens[i+1]]);
+                    if (!nextWord.startsWith('##') && !/^[.,!?;]/.test(nextWord)) {
+                        resultHtml += ' ';
+                    }
+                }
+            }
+            
+            return resultHtml || text;
         }
 
         async function getVector(text) {
             const output = await extractor(text, { pooling: 'mean', normalize: true });
-            return JSON.stringify(Array.from(output.data));
+            return Array.from(output.data);
         }
 
         async function doSearch() {
+            if (!(await ensureInitialized())) return;
             const q = queryEl.value.trim();
-            if (!q || !db) return;
+            if (!q) return;
 
             btnEl.disabled = true;
-            resultsEl.innerHTML = '<div class="text-gray-500 italic">Thinking... (Computing Vector)</div>';
+            resultsEl.innerHTML = '<div class="text-gray-500 italic">Thinking... (Analyzing Meaning)</div>';
             const mode = modeEl.value;
             const terms = q.split(/\s+/);
 
             try {
                 let rows;
+                let qVec = null;
+
                 if (mode === 'vector') {
-                    const vecJson = await getVector(q);
+                    qVec = await getVector(q);
                     rows = db.exec({
                         sql: `
-                            SELECT c.topic, c.start_time, c.summary, vid.url, c.start_seconds, vid.title, vec.distance
+                            SELECT c.topic, c.start_time, c.summary, vid.url, c.start_seconds, vid.title, vec.distance, c.id
                             FROM chapters c
                             JOIN videos vid ON vid.id = c.video_id
                             JOIN vector_full_scan('chapters', 'embedding', vector_as_f32(?)) vec ON c.id = vec.rowid
                             ORDER BY vec.distance ASC
                             LIMIT 10
                         `,
-                        bind: [vecJson],
+                        bind: [JSON.stringify(qVec)],
                         returnValue: "resultRows"
                     });
                 } else {
                     const ftsQuery = terms.map(t => `"${t}"`).join(' OR ');
                     rows = db.exec({
                         sql: `
-                            SELECT c.topic, c.start_time, c.summary, vid.url, c.start_seconds, vid.title, 0 as distance
+                            SELECT c.topic, c.start_time, c.summary, vid.url, c.start_seconds, vid.title, 0 as distance, c.id
                             FROM chapters_fts
                             JOIN chapters c ON c.id = chapters_fts.rowid
                             JOIN videos vid ON vid.id = c.video_id
@@ -168,29 +227,60 @@
                 if (rows.length === 0) {
                     resultsEl.innerHTML = '<div class="result-card p-4 rounded-md italic">No results found.</div>';
                 } else {
-                    rows.forEach(row => {
-                        const [topic, startTime, summary, url, startSec, vTitle, dist] = row;
+                    for (const row of rows) {
+                        const [topic, startTime, summary, url, startSec, vTitle, dist, id] = row;
                         const videoId = url.match(/v=([^&]+)/)?.[1] || '';
                         const watchUrl = `https://www.youtube.com/watch?v=${videoId}&t=${startSec}`;
                         
+                        // Fix 1: Improved Match % logic (clipped 0-100)
+                        // L2 distance on unit vectors ranges 0 to 2. 
+                        // Similarity = 1 - (dist^2 / 2). 
+                        const similarity = Math.max(0, 1 - (dist * dist) / 2);
+                        const matchPct = (similarity * 100).toFixed(1);
+
+                        // Fix 2: Semantic Highlighting (Trick B)
+                        let displayTopic = topic;
+                        let displaySummary = summary;
+                        
+                        if (mode === 'vector' && qVec) {
+                            // Only highlight top 3 for performance
+                            if (rows.indexOf(row) < 3) {
+                                displayTopic = await highlightSemantically(qVec, topic);
+                                displaySummary = await highlightSemantically(qVec, summary);
+                            }
+                        } else {
+                            // Fallback to keyword highlight
+                            const highlight = (s) => {
+                                let out = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                                terms.forEach(t => {
+                                    if (t.length < 2) return;
+                                    const re = new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+                                    out = out.replace(re, '<mark>$1</mark>');
+                                });
+                                return out;
+                            };
+                            displayTopic = highlight(topic);
+                            displaySummary = highlight(summary);
+                        }
+
                         const card = document.createElement('div');
                         card.className = 'result-card p-4 rounded-md shadow-sm';
                         card.innerHTML = `
                             <div class="flex justify-between items-start mb-2">
-                                <h3 class="text-blue-400 font-semibold text-lg">${highlight(topic, terms)}</h3>
+                                <h3 class="text-blue-400 font-semibold text-lg">${displayTopic}</h3>
                                 <span class="text-xs font-mono text-gray-500 bg-gray-800 px-2 py-1 rounded">${startTime}</span>
                             </div>
-                            <p class="text-sm text-gray-300 mb-3">${highlight(summary, terms)}</p>
+                            <p class="text-sm text-gray-300 mb-3">${displaySummary}</p>
                             <div class="flex justify-between items-center text-xs">
                                 <span class="text-gray-500">${vTitle}</span>
                                 <div class="flex gap-4">
-                                    ${mode === 'vector' ? `<span class="text-green-600 font-mono">match: ${((1 - dist) * 100).toFixed(1)}%</span>` : ''}
+                                    ${mode === 'vector' ? `<span class="text-green-600 font-mono">match: ${matchPct}%</span>` : ''}
                                     <a href="${watchUrl}" target="_blank" class="text-green-500 hover:underline">▶ Watch</a>
                                 </div>
                             </div>
                         `;
                         resultsEl.appendChild(card);
-                    });
+                    }
                 }
 
             } catch (err) {
@@ -202,8 +292,16 @@
 
         queryEl.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
         btnEl.addEventListener('click', doSearch);
+        statusEl.addEventListener('click', ensureInitialized);
+        modeEl.addEventListener('change', () => { if(modeEl.value === 'vector') ensureInitialized(); });
 
-        init();
+        // Lazy init on first interaction
+        queryEl.addEventListener('focus', ensureInitialized, { once: true });
+
+        // Initial minimal init
+        ensureInitialized();
     </script>
+</body>
+</html>
 </body>
 </html>
