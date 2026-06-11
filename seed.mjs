@@ -1,95 +1,101 @@
 import initSqlite from '@sqliteai/sqlite-wasm';
+import { pipeline } from '@xenova/transformers';
+import Database from 'better-sqlite3';
 import fs from 'fs';
 
-// Simple "embedding" generator for demo purposes
-// In a real app, you'd use OpenAI, Transformers.js, etc.
-function mockEmbedding(text) {
-    const vec = new Float32Array(3);
-    const lower = text.toLowerCase();
-    // Very simple heuristic: count certain letters to differentiate vectors
-    vec[0] = (lower.match(/a/g) || []).length / 10;
-    vec[1] = (lower.match(/e/g) || []).length / 10;
-    vec[2] = (lower.match(/i/g) || []).length / 10;
-    return JSON.stringify(Array.from(vec));
-}
+const SRC_DB_PATH = '../../caption-getter/v1/pkn.db';
+const DEST_DB_PATH = './pkn.db';
+const MODEL_NAME = 'Xenova/all-MiniLM-L6-v2';
 
-async function seed() {
-    const sqlite3 = await initSqlite();
-    const db = new sqlite3.oo1.DB('pkn.db', 'c');
+async function run() {
+    console.log(`Loading model: ${MODEL_NAME}...`);
+    const extractor = await pipeline('feature-extraction', MODEL_NAME);
 
-    try {
-        console.log("Creating schema...");
-        db.exec(`
-            CREATE TABLE videos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                url TEXT NOT NULL UNIQUE
-            );
-            CREATE TABLE chapters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                video_id INTEGER NOT NULL REFERENCES videos(id),
-                start_time TEXT NOT NULL,
-                start_seconds INTEGER NOT NULL,
-                topic TEXT NOT NULL,
-                summary TEXT,
-                embedding BLOB
-            );
-            CREATE VIRTUAL TABLE chapters_fts USING fts5(
-                topic,
-                summary,
-                content=chapters,
-                content_rowid=id
-            );
-        `);
-
-        // Initialize vector extension
-        db.exec("SELECT vector_init('chapters', 'embedding', 'dimension=3,distance=l2')");
-
-        console.log("Inserting data...");
-        const videos = [
-            { id: 1, title: "Parenting 101", url: "https://youtube.com/watch?v=123" },
-            { id: 2, title: "Disiplin Anak", url: "https://youtube.com/watch?v=456" }
-        ];
-
-        for (const v of videos) {
-            db.exec({
-                sql: "INSERT INTO videos(id, title, url) VALUES(?, ?, ?)",
-                bind: [v.id, v.title, v.url]
-            });
-        }
-
-        const chapters = [
-            { video_id: 1, start_time: "00:01", start_seconds: 1, topic: "Tangki Cinta", summary: "Menjelaskan tentang kebutuhan kasih sayang anak." },
-            { video_id: 1, start_time: "05:00", start_seconds: 300, topic: "Bakat Anak", summary: "Cara mengenali potensi terpendam anak." },
-            { video_id: 2, start_time: "02:30", start_seconds: 150, topic: "Disiplin Positif", summary: "Metode mendisiplinkan tanpa kekerasan." },
-            { video_id: 2, start_time: "10:15", start_seconds: 615, topic: "Komunikasi Efektif", summary: "Berbicara agar anak mau mendengarkan." }
-        ];
-
-        for (const c of chapters) {
-            const vecJson = mockEmbedding(c.topic + " " + c.summary);
-            db.exec({
-                sql: "INSERT INTO chapters(video_id, start_time, start_seconds, topic, summary, embedding) VALUES(?, ?, ?, ?, ?, vector_as_f32(?))",
-                bind: [c.video_id, c.start_time, c.start_seconds, c.topic, c.summary, vecJson]
-            });
-            // Update FTS
-            db.exec({
-                sql: "INSERT INTO chapters_fts(rowid, topic, summary) VALUES(last_insert_rowid(), ?, ?)",
-                bind: [c.topic, c.summary]
-            });
-        }
-
-        console.log("Database seeded successfully.");
-
-        // Export to file system (WASM FS to Node FS)
-        const dbExport = sqlite3.capi.sqlite3_js_db_export(db.pointer);
-        fs.writeFileSync('pkn.db', dbExport);
-        console.log("pkn.db written to disk.");
-
-    } catch (err) {
-        console.error(err);
-    } finally {
-        db.close();
+    // 1. Read source data with better-sqlite3
+    console.log(`Reading source database from ${SRC_DB_PATH}...`);
+    if (!fs.existsSync(SRC_DB_PATH)) {
+        console.error("Source database not found!");
+        process.exit(1);
     }
+    
+    const srcDb = new Database(SRC_DB_PATH);
+    const videos = srcDb.prepare("SELECT id, title, url FROM videos").all();
+    const chapters = srcDb.prepare("SELECT id, video_id, start_time, start_seconds, topic, summary FROM chapters").all();
+    srcDb.close();
+
+    console.log(`Found ${videos.length} videos and ${chapters.length} chapters.`);
+
+    // 2. Initialize WASM DB for destination
+    const sqlite3 = await initSqlite();
+    const destDb = new sqlite3.oo1.DB(":memory:", "c");
+    destDb.exec(`
+        CREATE TABLE videos (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE chapters (
+            id INTEGER PRIMARY KEY,
+            video_id INTEGER NOT NULL REFERENCES videos(id),
+            start_time TEXT NOT NULL,
+            start_seconds INTEGER NOT NULL,
+            topic TEXT NOT NULL,
+            summary TEXT,
+            embedding BLOB
+        );
+        CREATE VIRTUAL TABLE chapters_fts USING fts5(
+            topic,
+            summary,
+            content=chapters,
+            content_rowid=id
+        );
+    `);
+
+    // Initialize vector extension
+    destDb.exec("SELECT vector_init('chapters', 'embedding', 'dimension=384,distance=l2')");
+
+    console.log("Inserting videos...");
+    for (const v of videos) {
+        destDb.exec({
+            sql: "INSERT INTO videos(id, title, url) VALUES(?, ?, ?)",
+            bind: [v.id, v.title, v.url]
+        });
+    }
+
+    console.log(`Generating embeddings and inserting chapters (this may take a minute)...`);
+    let count = 0;
+    for (const c of chapters) {
+        const text = `${c.topic} ${c.summary || ''}`.trim();
+        
+        // Generate real embedding
+        const output = await extractor(text, { pooling: 'mean', normalize: true });
+        const vector = Array.from(output.data);
+        const vecJson = JSON.stringify(vector);
+
+        destDb.exec({
+            sql: "INSERT INTO chapters(id, video_id, start_time, start_seconds, topic, summary, embedding) VALUES(?, ?, ?, ?, ?, ?, vector_as_f32(?))",
+            bind: [c.id, c.video_id, c.start_time, c.start_seconds, c.topic, c.summary, vecJson]
+        });
+
+        // Update FTS
+        destDb.exec({
+            sql: "INSERT INTO chapters_fts(rowid, topic, summary) VALUES(?, ?, ?)",
+            bind: [c.id, c.topic, c.summary]
+        });
+
+        count++;
+        if (count % 100 === 0) console.log(`  Processed ${count}/${chapters.length}...`);
+    }
+
+    console.log("Database seeded successfully.");
+
+    // Export to file system
+    const dbExport = sqlite3.capi.sqlite3_js_db_export(destDb.pointer);
+    fs.writeFileSync(DEST_DB_PATH, dbExport);
+    destDb.close();
+    
+    console.log(`Final database written to ${DEST_DB_PATH} (${(dbExport.byteLength / 1024 / 1024).toFixed(2)} MB)`);
+    process.exit(0);
 }
 
-seed();
+run().catch(console.error);
