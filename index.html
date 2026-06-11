@@ -1,119 +1,203 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>sqlite-vector Explorer</title>
+    <title>PKN VideoDB — Vector Search</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { background-color: #f9fafb; }
-        pre { white-space: pre-wrap; word-wrap: break-word; }
+        body { background-color: #0d1117; color: #c9d1d9; }
+        .result-card { background: #161b22; border: 1px solid #30363d; }
+        mark { background: #d29922; color: #0d1117; padding: 0 2px; border-radius: 2px; }
     </style>
 </head>
-<body class="p-8">
-    <div class="max-w-2xl mx-auto bg-white p-6 rounded-lg shadow-md">
-        <h1 class="text-2xl font-bold mb-4">sqlite-vector WASM Explorer</h1>
-        <p class="mb-4 text-gray-600">Running SQLite with Vector Search in your browser!</p>
+<body class="p-6 max-w-4xl mx-auto">
+    <header class="mb-8">
+        <h1 class="text-3xl font-bold text-blue-400 mb-2">🎓 PKN VideoDB (Vector)</h1>
+        <p class="text-gray-400">Ceramah Parenting Islam — Powered by <code>sqlite-vector</code> WASM</p>
+    </header>
+
+    <div id="status" class="mb-4 p-3 rounded text-sm bg-yellow-900/30 border border-yellow-700 text-yellow-500">
+        Initializing database...
+    </div>
+
+    <div class="flex flex-col md:flex-row gap-4 mb-6">
+        <input type="text" id="query" placeholder="Search chapters... (e.g. tangki cinta, bakat anak)" 
+               class="flex-1 bg-[#161b22] border border-[#30363d] rounded-md px-4 py-2 focus:outline-none focus:border-blue-500" disabled>
         
-        <div class="mb-4">
-            <button id="runBtn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded transition">
-                Run Example
-            </button>
-        </div>
+        <select id="searchMode" class="bg-[#161b22] border border-[#30363d] rounded-md px-4 py-2 focus:outline-none">
+            <option value="vector">Vector Search</option>
+            <option value="fts">FTS Search (Keyword)</option>
+        </select>
 
-        <div id="status" class="mb-4 text-sm font-mono text-blue-600">Initializing...</div>
+        <button id="searchBtn" class="bg-green-700 hover:bg-green-600 text-white px-6 py-2 rounded-md transition disabled:opacity-50" disabled>
+            Search
+        </button>
+    </div>
 
-        <div class="bg-gray-100 p-4 rounded border border-gray-200">
-            <h2 class="text-lg font-semibold mb-2">Output Log:</h2>
-            <pre id="output" class="text-sm font-mono bg-black text-green-400 p-4 rounded min-h-[200px]"></pre>
-        </div>
+    <div id="stats" class="text-sm text-gray-500 mb-4"></div>
+
+    <div id="results" class="space-y-4">
+        <!-- Results will appear here -->
     </div>
 
     <script type="module">
         import initSqlite from 'https://esm.sh/@sqliteai/sqlite-wasm';
 
-        const output = document.getElementById('output');
-        const status = document.getElementById('status');
-        const runBtn = document.getElementById('runBtn');
+        let db = null;
+        const statusEl = document.getElementById('status');
+        const queryEl = document.getElementById('query');
+        const btnEl = document.getElementById('searchBtn');
+        const resultsEl = document.getElementById('results');
+        const statsEl = document.getElementById('stats');
+        const modeEl = document.getElementById('searchMode');
 
-        function log(msg) {
-            output.textContent += msg + '\n';
-            output.scrollTop = output.scrollHeight;
+        // Mock embedding generator (must match seed script)
+        function mockEmbedding(text) {
+            const vec = new Float32Array(3);
+            const lower = text.toLowerCase();
+            vec[0] = (lower.match(/a/g) || []).length / 10;
+            vec[1] = (lower.match(/e/g) || []).length / 10;
+            vec[2] = (lower.match(/i/g) || []).length / 10;
+            return JSON.stringify(Array.from(vec));
         }
 
         async function init() {
             try {
-                status.textContent = 'Loading SQLite WASM...';
                 const sqlite3 = await initSqlite();
-                status.textContent = 'SQLite WASM Ready!';
-                log('SQLite WASM loaded successfully.');
                 
-                runBtn.addEventListener('click', () => runExample(sqlite3));
+                statusEl.textContent = 'Downloading database...';
+                const resp = await fetch('pkn.db');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const buf = await resp.arrayBuffer();
+                
+                db = new sqlite3.oo1.DB('pkn.db', 'c');
+                
+                // Load data into DB
+                const sqlite3_js_db_deserialize = sqlite3.capi.sqlite3_js_db_deserialize;
+                // Note: Better way to load from arraybuffer is deserialize or just init with it if using higher level
+                // But since we used 'pkn.db' as filename, we might need to write it to the WASM VFS
+                sqlite3.wasm.allocFromTypedArray(new Uint8Array(buf));
+                // Actually, for simplicity with this library, I'll just use the memory db if I can't easily deserialize
+                // Wait, initSqlite often uses a persistent storage or memory.
+                
+                // Let's try the direct approach:
+                const data = new Uint8Array(buf);
+                const p = sqlite3.wasm.alloc(data.length);
+                sqlite3.wasm.heapU8().set(data, p);
+                sqlite3.capi.sqlite3_deserialize(db.pointer, 'main', p, data.length, data.length, 0x01); // SQLITE_DESERIALIZE_FREEONCLOSE
+
+                const videoCount = db.exec("SELECT COUNT(*) FROM videos", {returnValue: "resultRows"})[0][0];
+                const chapterCount = db.exec("SELECT COUNT(*) FROM chapters", {returnValue: "resultRows"})[0][0];
+                
+                // Re-init vector extension in this connection
+                db.exec("SELECT vector_init('chapters', 'embedding', 'dimension=3,distance=l2')");
+
+                statusEl.className = 'mb-4 p-3 rounded text-sm bg-green-900/30 border border-green-700 text-green-500';
+                statusEl.textContent = 'Database Ready!';
+                
+                statsEl.textContent = `${videoCount} videos · ${chapterCount} chapters · ${(buf.byteLength/1024).toFixed(0)} KB`;
+                
+                queryEl.disabled = false;
+                btnEl.disabled = false;
+                queryEl.focus();
+
             } catch (err) {
-                status.textContent = 'Initialization Error';
-                log('Error: ' + err.message);
+                statusEl.className = 'mb-4 p-3 rounded text-sm bg-red-900/30 border border-red-700 text-red-500';
+                statusEl.textContent = 'Error: ' + err.message;
                 console.error(err);
             }
         }
 
-        async function runExample(sqlite3) {
-            output.textContent = '';
-            log('Starting example...');
-            const db = new sqlite3.oo1.DB(':memory:', 'c');
-            
+        function highlight(text, terms) {
+            if (!text) return '';
+            let s = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            for (const t of terms) {
+                if (!t) continue;
+                const re = new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+                s = s.replace(re, '<mark>$1</mark>');
+            }
+            return s;
+        }
+
+        async function doSearch() {
+            const q = queryEl.value.trim();
+            if (!q || !db) return;
+
+            resultsEl.innerHTML = '<div class="text-gray-500 italic">Searching...</div>';
+            const mode = modeEl.value;
+            const terms = q.split(/\s+/);
+
             try {
-                const version = db.exec("SELECT vector_version()", { returnValue: "resultRows" });
-                log(`sqlite-vector version: ${version[0][0]}`);
-                
-                log('Creating table items...');
-                db.exec("CREATE TABLE items(id INTEGER PRIMARY KEY, content TEXT, embedding BLOB)");
-                
-                log('Initializing vector extension...');
-                db.exec("SELECT vector_init('items', 'embedding', 'dimension=3,distance=l2')");
-                
-                const items = [
-                    { content: "Apple", vector: "[1.0, 1.0, 0.0]" },
-                    { content: "Banana", vector: "[1.1, 0.9, 0.1]" },
-                    { content: "Space Rocket", vector: "[0.0, 0.0, 10.0]" }
-                ];
-                
-                log('Inserting data...');
-                for (const item of items) {
-                    db.exec({
-                        sql: "INSERT INTO items(content, embedding) VALUES(?, vector_as_f32(?))",
-                        bind: [item.content, item.vector]
+                let rows;
+                if (mode === 'vector') {
+                    const vecJson = mockEmbedding(q);
+                    rows = db.exec({
+                        sql: `
+                            SELECT c.topic, c.start_time, c.summary, v.url, c.start_seconds, v.title, v.distance
+                            FROM chapters c
+                            JOIN videos v ON v.id = c.video_id
+                            JOIN vector_full_scan('chapters', 'embedding', vector_as_f32(?)) v ON c.id = v.rowid
+                            ORDER BY v.distance ASC
+                            LIMIT 10
+                        `,
+                        bind: [vecJson],
+                        returnValue: "resultRows"
                     });
-                    log(`  Inserted: ${item.content}`);
+                } else {
+                    const ftsQuery = terms.map(t => `"${t}"`).join(' OR ');
+                    rows = db.exec({
+                        sql: `
+                            SELECT c.topic, c.start_time, c.summary, v.url, c.start_seconds, v.title, 0 as distance
+                            FROM chapters_fts
+                            JOIN chapters c ON c.id = chapters_fts.rowid
+                            JOIN videos v ON v.id = c.video_id
+                            WHERE chapters_fts MATCH ?
+                            ORDER BY rank
+                            LIMIT 10
+                        `,
+                        bind: [ftsQuery],
+                        returnValue: "resultRows"
+                    });
                 }
-                
-                const queryVector = "[1.0, 0.9, 0.0]";
-                log(`\nSearching for neighbors of ${queryVector}...`);
-                
-                const results = db.exec({
-                    sql: `
-                        SELECT i.content, v.distance 
-                        FROM items i
-                        JOIN vector_full_scan('items', 'embedding', vector_as_f32(?)) v ON i.id = v.rowid
-                        ORDER BY v.distance ASC
-                        LIMIT 5
-                    `,
-                    bind: [queryVector],
-                    returnValue: "resultRows"
+
+                resultsEl.innerHTML = '';
+                if (rows.length === 0) {
+                    resultsEl.innerHTML = '<div class="result-card p-4 rounded-md italic">No results found.</div>';
+                    return;
+                }
+
+                rows.forEach(row => {
+                    const [topic, startTime, summary, url, startSec, vTitle, dist] = row;
+                    const videoId = url.match(/v=([^&]+)/)?.[1] || '';
+                    const watchUrl = `https://www.youtube.com/watch?v=${videoId}&t=${startSec}`;
+                    
+                    const card = document.createElement('div');
+                    card.className = 'result-card p-4 rounded-md shadow-sm';
+                    card.innerHTML = `
+                        <div class="flex justify-between items-start mb-2">
+                            <h3 class="text-blue-400 font-semibold text-lg">${highlight(topic, terms)}</h3>
+                            <span class="text-xs font-mono text-gray-500 bg-gray-800 px-2 py-1 rounded">${startTime}</span>
+                        </div>
+                        <p class="text-sm text-gray-300 mb-3">${highlight(summary, terms)}</p>
+                        <div class="flex justify-between items-center text-xs">
+                            <span class="text-gray-500">${vTitle}</span>
+                            <div class="flex gap-4">
+                                ${mode === 'vector' ? `<span class="text-green-600 font-mono">dist: ${dist.toFixed(4)}</span>` : ''}
+                                <a href="${watchUrl}" target="_blank" class="text-green-500 hover:underline">▶ Watch</a>
+                            </div>
+                        </div>
+                    `;
+                    resultsEl.appendChild(card);
                 });
-                
-                log('Search Results:');
-                results.forEach(([content, distance]) => {
-                    log(`- ${content} (distance: ${distance.toFixed(4)})`);
-                });
-                
+
             } catch (err) {
-                log('Error during execution: ' + err.message);
-                console.error(err);
-            } finally {
-                db.close();
-                log('\nDatabase closed.');
+                resultsEl.innerHTML = `<div class="p-4 bg-red-900/20 text-red-500 rounded border border-red-700">Error: ${err.message}</div>`;
             }
         }
+
+        queryEl.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+        btnEl.addEventListener('click', doSearch);
 
         init();
     </script>
