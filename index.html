@@ -84,7 +84,7 @@
                 // Let's try the direct approach:
                 const data = new Uint8Array(buf);
                 const p = sqlite3.wasm.alloc(data.length);
-                sqlite3.wasm.heapU8.set(data, p); // heapU8 is a property (Uint8Array), not a function
+                sqlite3.wasm.heap8u().set(data, p); // heap8u() is a function that returns a Uint8Array
                 sqlite3.capi.sqlite3_deserialize(db.pointer, 'main', p, data.length, data.length, 0x01); // SQLITE_DESERIALIZE_FREEONCLOSE
 
                 const videoCount = db.exec("SELECT COUNT(*) FROM videos", {returnValue: "resultRows"})[0][0];
