@@ -144,7 +144,10 @@
                 const wordText = wordBuffer.map(b => b.text).join('');
                 const maxScore = Math.max(...wordBuffer.map(b => b.score));
                 
-                if (maxScore > threshold) {
+                // Only highlight if it contains at least one letter or number
+                const hasAlphanumeric = /[a-zA-Z0-9]/.test(wordText);
+
+                if (maxScore > threshold && hasAlphanumeric) {
                     resultHtml += `<mark class="bg-blue-500/40 text-blue-100 px-0.5 rounded">${wordText}</mark>`;
                 } else {
                     resultHtml += wordText;
