@@ -117,18 +117,14 @@
         async function highlightSemantically(queryVector, text) {
             if (!extractor || !text) return text;
             
-            // 1. Get token-level embeddings (pooling: 'none')
             const output = await extractor(text, { pooling: 'none' });
             const tokenVectors = output.data; 
             const seqLen = output.dims[1];
             const dim = output.dims[2];
 
-            // 2. Get tokens for reconstruction
-            // We need to use the tokenizer directly to get the mapping
             const { input_ids } = await extractor.tokenizer(text);
             const tokens = input_ids.data;
 
-            // 3. Compute scores for each token
             const scores = new Float32Array(seqLen);
             for (let i = 0; i < seqLen; i++) {
                 let dot = 0;
@@ -138,37 +134,44 @@
                 scores[i] = dot;
             }
 
-            // 4. Reconstruct text with highlights
-            // Threshold 0.35 - 0.45 usually works for MiniLM semantic similarity
-            const threshold = 0.4;
+            const threshold = 0.45; // Slightly higher for word-level
             let resultHtml = '';
+            let wordBuffer = [];
             
+            const flushBuffer = () => {
+                if (wordBuffer.length === 0) return;
+                
+                const wordText = wordBuffer.map(b => b.text).join('');
+                const maxScore = Math.max(...wordBuffer.map(b => b.score));
+                
+                if (maxScore > threshold) {
+                    resultHtml += `<mark class="bg-blue-500/40 text-blue-100 px-0.5 rounded">${wordText}</mark>`;
+                } else {
+                    resultHtml += wordText;
+                }
+                wordBuffer = [];
+            };
+
             for (let i = 0; i < tokens.length; i++) {
                 const tokenId = tokens[i];
-                // Skip special tokens [CLS], [SEP]
                 if (tokenId === 101 || tokenId === 102) continue;
 
-                let word = extractor.tokenizer.decode([tokenId]);
-                
-                // Clean up WordPiece markers (##)
-                const isContinuation = word.startsWith('##');
-                if (isContinuation) word = word.substring(2);
+                let tokenText = extractor.tokenizer.decode([tokenId], { skip_special_tokens: true });
+                if (!tokenText) continue;
 
-                if (scores[i] > threshold) {
-                    resultHtml += `<mark class="bg-blue-500/40 text-blue-100">${word}</mark>`;
-                } else {
-                    resultHtml += word;
-                }
+                const isContinuation = tokenText.startsWith('##');
                 
-                // Add space if next token isn't a continuation or punctuation
-                // This is a simple approximation
-                if (i < tokens.length - 1) {
-                    const nextWord = extractor.tokenizer.decode([tokens[i+1]]);
-                    if (!nextWord.startsWith('##') && !/^[.,!?;]/.test(nextWord)) {
-                        resultHtml += ' ';
-                    }
+                if (!isContinuation && wordBuffer.length > 0) {
+                    flushBuffer();
+                    resultHtml += ' '; // Simple space separator
                 }
+
+                wordBuffer.push({
+                    text: isContinuation ? tokenText.substring(2) : tokenText,
+                    score: scores[i]
+                });
             }
+            flushBuffer();
             
             return resultHtml || text;
         }
